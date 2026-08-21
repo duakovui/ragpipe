@@ -10,15 +10,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	html2md "github.com/JohannesKaufmann/html-to-markdown/v2"
 	readability "codeberg.org/readeck/go-readability/v2"
+	html2md "github.com/JohannesKaufmann/html-to-markdown/v2"
 	"github.com/PuerkitoBio/goquery"
 	"golang.org/x/net/html"
 )
 
 type CrawlResult struct {
-	Url string
-	Title string
+	Url      string
+	Title    string
 	Markdown string
 }
 
@@ -29,19 +29,20 @@ type Crawler struct {
 }
 
 type crawlEvent struct {
-	url string
+	url    string
 	result *CrawlResult
-	err *CustomError
+	err    *CustomError
+	done   bool
 }
 
 type CrawlConfig struct {
-	GetArticle func(doc *goquery.Document, pageURL *url.URL) (*Article, error)
-	IgnoreContent func(doc *goquery.Document) bool
-	CustomLinkSelector func(doc *goquery.Document) *goquery.Selection
+	GetArticle         func(doc *goquery.Document, pageURL *url.URL) (*Article, error)
+	IgnoreContent      func(doc *goquery.Document) bool
+	IgnoreLink		   func(url string) bool	
 }
 
 type Article struct {
-	Title string
+	Title   string
 	Content *html.Node
 }
 
@@ -51,7 +52,7 @@ func defaultGetArtical(doc *goquery.Document, pageURL *url.URL) (*Article, error
 		return nil, err
 	}
 	return &Article{
-		Title: article.Title(),
+		Title:   article.Title(),
 		Content: article.Node,
 	}, nil
 }
@@ -100,7 +101,7 @@ func (c *Crawler) CrawlPage(ctx context.Context, baseUrl string, getArticle func
 		article, err = getArticle(doc, pageURL)
 	} else {
 		article, err = defaultGetArtical(doc, pageURL)
-	}	
+	}
 	if err != nil {
 		return "", nil, err
 	}
@@ -110,7 +111,7 @@ func (c *Crawler) CrawlPage(ctx context.Context, baseUrl string, getArticle func
 		return "", nil, err
 	}
 
-	return article.Title, md, nil	
+	return article.Title, md, nil
 }
 
 func (c *Crawler) CrawlRecursive(ctx context.Context, baseUrl string, config *CrawlConfig, errCh chan<- CustomError) (chan CrawlResult, *atomic.Int64) {
@@ -139,11 +140,11 @@ func (c *Crawler) CrawlRecursive(ctx context.Context, baseUrl string, config *Cr
 	} else {
 		reportErr(errCh, CustomError{
 			Stage: StageCrawl,
-			Op: "init",
-			URL: baseUrl,
-			Err: "invalid start link",
+			Op:    "init",
+			URL:   baseUrl,
+			Err:   "invalid start link",
 		})
-	}	
+	}
 
 	var cfg CrawlConfig
 	if config != nil {
@@ -167,11 +168,19 @@ func (c *Crawler) CrawlRecursive(ctx context.Context, baseUrl string, config *Cr
 			workerWG.Wait()
 			close(results)
 		}
+		inFlight := 0
 
 		for {
-			if ctx.Err() != nil || len(queue) == 0 {
+			if ctx.Err() != nil || (len(queue) == 0 && inFlight == 0) {
 				closeAndWait()
 				return
+			}
+
+			var nextURL chan string
+			var next string
+			if len(queue) > 0 && inFlight < c.numWorker {
+				nextURL = urls
+				next = queue[0]
 			}
 
 			select {
@@ -185,14 +194,18 @@ func (c *Crawler) CrawlRecursive(ctx context.Context, baseUrl string, config *Cr
 				if event.result != nil {
 					select {
 					case results <- *event.result:
-					case <- ctx.Done():
+					case <-ctx.Done():
 					}
 				}
 				if event.err != nil {
 					reportErr(errCh, *event.err)
 				}
-			case urls <- queue[0]:
+				if event.done {
+					inFlight--
+				}
+			case nextURL <- next:
 				queue = queue[1:]
+				inFlight++
 			}
 		}
 	}()
@@ -229,6 +242,10 @@ func normalizeCrawlURL(baseURL, rawURL string) (string, bool) {
 	}
 
 	ref.Fragment = ""
+	if len(ref.Path) > 1 {
+		ref.Path = strings.TrimRight(ref.Path, "/")
+	}
+	
 	return ref.String(), true
 }
 
@@ -241,9 +258,18 @@ func (c *Crawler) worker(ctx context.Context, urls <-chan string, events chan<- 
 		case <-ctx.Done():
 		}
 	}
+	sendDone := func() {
+		select {
+		case events <- crawlEvent{done: true}:
+		case <-ctx.Done():
+		}
+	}
 	sendJob := func(baseURL string, url string) {
 		canonical, ok := normalizeCrawlURL(baseURL, url)
 		if !ok {
+			return
+		}
+		if config.IgnoreLink != nil && config.IgnoreLink(canonical) {
 			return
 		}
 		if !markCrawled(canonical) {
@@ -258,10 +284,10 @@ func (c *Crawler) worker(ctx context.Context, urls <-chan string, events chan<- 
 	fail := func(op string, url string, err error) {
 		select {
 		case events <- crawlEvent{err: &CustomError{
-			Stage:    StageCrawl,
-			Op:       op,
-			URL:      url,
-			Err:      err.Error(),
+			Stage: StageCrawl,
+			Op:    op,
+			URL:   url,
+			Err:   err.Error(),
 		}}:
 		case <-ctx.Done():
 		}
@@ -293,18 +319,11 @@ func (c *Crawler) worker(ctx context.Context, urls <-chan string, events chan<- 
 			return
 		}
 
-		if config.CustomLinkSelector == nil {
-			doc.Find("a").Each(func(i int, a *goquery.Selection) {
-				sendJob(baseUrl, a.AttrOr("href", ""))
-			})
-		} else {
-			customLinks := config.CustomLinkSelector(doc)
-			customLinks.Each(func(i int, a *goquery.Selection) {
-				sendJob(baseUrl, a.AttrOr("href", ""))
-			})
-		}
+		doc.Find("a").Each(func(i int, a *goquery.Selection) {
+			sendJob(baseUrl, a.AttrOr("href", ""))
+		})
 
-		if (config.IgnoreContent != nil && config.IgnoreContent(doc)) {
+		if config.IgnoreContent != nil && config.IgnoreContent(doc) {
 			return
 		}
 
@@ -312,11 +331,17 @@ func (c *Crawler) worker(ctx context.Context, urls <-chan string, events chan<- 
 		article, err := config.GetArticle(doc, pageURL)
 		if err != nil {
 			fail("parse_article", baseUrl, err)
+			return
+		}
+		if article.Title == "" {
+			fail("parse_article", baseUrl, fmt.Errorf("missing title"))
+			return
 		}
 
 		md, err := html2md.ConvertNode(article.Content)
 		if err != nil {
 			fail("parse_markdown", baseUrl, err)
+			return
 		}
 		sendResult(CrawlResult{Url: baseUrl, Title: article.Title, Markdown: string(md)})
 	}
@@ -331,6 +356,7 @@ func (c *Crawler) worker(ctx context.Context, urls <-chan string, events chan<- 
 			}
 			counter.Add(1)
 			processJob(url)
+			sendDone()
 		}
 	}
 }
