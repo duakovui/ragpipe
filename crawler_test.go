@@ -31,7 +31,8 @@ func TestCrawlRecursiveWaitsForInFlightJobs(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	results, counter := crawler.CrawlRecursive(ctx, server.URL+"/", &ragpipe.CrawlConfig{
-		GetArticle: func(doc *goquery.Document, pageURL *url.URL) (*ragpipe.Article, error) {
+		GetArticle: func(doc *goquery.Document, baseUrl string) (*ragpipe.Article, error) {
+			pageURL, _ := url.Parse(baseUrl)
 			return &ragpipe.Article{
 				Title:   pageURL.Path,
 				Content: doc.Find("body").Get(0),

@@ -36,9 +36,10 @@ type crawlEvent struct {
 }
 
 type CrawlConfig struct {
-	GetArticle         func(doc *goquery.Document, pageURL *url.URL) (*Article, error)
-	IgnoreContent      func(doc *goquery.Document) bool
+	GetArticle         func(doc *goquery.Document, url string) (*Article, error)
+	IgnoreContent      func(doc *goquery.Document, url string) bool
 	IgnoreLink		   func(url string) bool	
+	LinkSelector       func(doc *goquery.Document) *goquery.Selection
 }
 
 type Article struct {
@@ -46,7 +47,8 @@ type Article struct {
 	Content *html.Node
 }
 
-func defaultGetArtical(doc *goquery.Document, pageURL *url.URL) (*Article, error) {
+func defaultGetArtical(doc *goquery.Document, baseUrl string) (*Article, error) {
+	pageURL, _ := url.Parse(baseUrl)
 	article, err := readability.FromDocument(doc.Selection.Get(0), pageURL)
 	if err != nil {
 		return nil, err
@@ -72,7 +74,7 @@ func NewCrawler(numWorker, bufferSize int, timeout time.Duration) *Crawler {
 	}
 }
 
-func (c *Crawler) CrawlPage(ctx context.Context, baseUrl string, getArticle func(doc *goquery.Document, pageURL *url.URL) (*Article, error)) (string, []byte, error) {
+func (c *Crawler) CrawlPage(ctx context.Context, baseUrl string, getArticle func(doc *goquery.Document, url string) (*Article, error)) (string, []byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseUrl, nil)
 	if err != nil {
 		return "", nil, err
@@ -95,12 +97,11 @@ func (c *Crawler) CrawlPage(ctx context.Context, baseUrl string, getArticle func
 		return "", nil, err
 	}
 
-	pageURL, _ := url.Parse(baseUrl)
 	var article *Article
 	if getArticle != nil {
-		article, err = getArticle(doc, pageURL)
+		article, err = getArticle(doc, baseUrl)
 	} else {
-		article, err = defaultGetArtical(doc, pageURL)
+		article, err = defaultGetArtical(doc, baseUrl)
 	}
 	if err != nil {
 		return "", nil, err
@@ -117,7 +118,7 @@ func (c *Crawler) CrawlPage(ctx context.Context, baseUrl string, getArticle func
 func (c *Crawler) CrawlRecursive(ctx context.Context, baseUrl string, config *CrawlConfig, errCh chan<- CustomError) (chan CrawlResult, *atomic.Int64) {
 	counter := new(atomic.Int64)
 	results := make(chan CrawlResult, c.bufferSize)
-	urls := make(chan string)
+	urls := make(chan string, c.numWorker)
 	events := make(chan crawlEvent, c.numWorker)
 	crawledLinks := make(map[string]struct{})
 	var crawledLinksMu sync.Mutex
@@ -242,9 +243,7 @@ func normalizeCrawlURL(baseURL, rawURL string) (string, bool) {
 	}
 
 	ref.Fragment = ""
-	if len(ref.Path) > 1 {
-		ref.Path = strings.TrimRight(ref.Path, "/")
-	}
+	ref.Path = strings.TrimRight(ref.Path, "/")
 	
 	return ref.String(), true
 }
@@ -319,16 +318,21 @@ func (c *Crawler) worker(ctx context.Context, urls <-chan string, events chan<- 
 			return
 		}
 
-		doc.Find("a").Each(func(i int, a *goquery.Selection) {
-			sendJob(baseUrl, a.AttrOr("href", ""))
-		})
+		if config.LinkSelector != nil {
+			config.LinkSelector(doc).Each(func(i int, a *goquery.Selection) {
+				sendJob(baseUrl, a.AttrOr("href", ""))
+			})
+		} else {
+			doc.Find("a").Each(func(i int, a *goquery.Selection) {
+				sendJob(baseUrl, a.AttrOr("href", ""))
+			})
+		}
 
-		if config.IgnoreContent != nil && config.IgnoreContent(doc) {
+		if config.IgnoreContent != nil && config.IgnoreContent(doc, baseUrl) {
 			return
 		}
 
-		pageURL, _ := url.Parse(baseUrl)
-		article, err := config.GetArticle(doc, pageURL)
+		article, err := config.GetArticle(doc, baseUrl)
 		if err != nil {
 			fail("parse_article", baseUrl, err)
 			return
