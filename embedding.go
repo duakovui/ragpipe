@@ -20,6 +20,7 @@ type EmbeddingResponse struct {
 
 type EmbeddingClient interface {
 	CreateBatch(ctx context.Context, input []string) (EmbeddingResponse, error)
+	Create(ctx context.Context, input string) ([]float32, error)
 }
 
 type Payload struct {
