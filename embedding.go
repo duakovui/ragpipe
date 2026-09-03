@@ -65,7 +65,10 @@ func NewEmbeddingProcessor(numWorker, batchSize int, countToken TokenCounterFunc
 	}
 }
 
-func (e *EmbeddingProcessor) Process(ctx context.Context, results <-chan CrawlResult, errCh chan<- CustomError) {
+func (e *EmbeddingProcessor) Process(ctx context.Context, results <-chan CrawlResult, errCh chan<- CustomError, splitChunksFunc func(doc string, count TokenCounterFunc, option Options) []Chunk) {
+	if splitChunksFunc == nil {
+		splitChunksFunc = SplitToChunks
+	}
 	batchChan := make(chan []EmbeddingJob, 100)
 	batch := make([]EmbeddingJob, 0, e.batchSize)
 
@@ -85,7 +88,7 @@ func (e *EmbeddingProcessor) Process(ctx context.Context, results <-chan CrawlRe
 		if ctx.Err() != nil {
 			break
 		}
-		chunks := SplitToChunks(res.Markdown, e.countToken, e.chunkOption)
+		chunks := splitChunksFunc(res.Markdown, e.countToken, e.chunkOption)
 		for _, chunk := range chunks {
 			batch = append(batch, EmbeddingJob{
 				CleanText: chunk.CleanText,
