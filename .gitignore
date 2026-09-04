@@ -1,0 +1,27 @@
+# Binaries / build output
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+/dist/
+
+# Logs (error logger: errors.log + logs/embedding/*.json)
+*.log
+logs/
+
+# Env & secrets
+.env
+.env.*
+*.pem
+*.key
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
