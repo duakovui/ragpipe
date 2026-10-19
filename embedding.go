@@ -3,6 +3,7 @@ package ragpipe
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 )
 
@@ -90,18 +91,27 @@ func (e *EmbeddingProcessor) Process(ctx context.Context, results <-chan CrawlRe
 		}
 		chunks := splitChunksFunc(res.Markdown, e.countToken, e.chunkOption)
 		for _, chunk := range chunks {
-			batch = append(batch, EmbeddingJob{
-				CleanText: chunk.CleanText,
-				Payload: Payload{
-					Index:    chunk.Index,
-					Document: res.Title,
-					Link:     res.Url,
-					Content:  chunk.RawText,
-				},
-			})
-			if len(batch) == e.batchSize {
-				sendBatch(batch)
-				batch = make([]EmbeddingJob, 0, e.batchSize)
+			if chunk.CleanText == "" {
+				if len(batch) == 0 {
+					continue
+				}
+				if batch[len(batch)-1].Payload.Link == res.Url {
+					batch[len(batch)-1].Payload.Content += fmt.Sprintf("\n%s", chunk.RawText)
+				}
+			} else {
+				if len(batch) == e.batchSize {
+					sendBatch(batch)
+					batch = make([]EmbeddingJob, 0, e.batchSize)
+				}
+				batch = append(batch, EmbeddingJob{
+					CleanText: chunk.CleanText,
+					Payload: Payload{
+						Index:    chunk.Index,
+						Document: res.Title,
+						Link:     res.Url,
+						Content:  chunk.RawText,
+					},
+				})
 			}
 		}
 	}
