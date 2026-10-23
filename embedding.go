@@ -48,7 +48,6 @@ type EmbeddingProcessor struct {
 	chunkOption Options
 	client    EmbeddingClient
 	vectorStore VectorStore
-	wg          sync.WaitGroup
 }
 
 type VectorStore interface {
@@ -66,7 +65,7 @@ func NewEmbeddingProcessor(numWorker, batchSize int, countToken TokenCounterFunc
 	}
 }
 
-func (e *EmbeddingProcessor) Process(ctx context.Context, results <-chan CrawlResult, errCh chan<- CustomError, splitChunksFunc func(doc string, count TokenCounterFunc, option Options) []Chunk) {
+func (e *EmbeddingProcessor) Process(ctx context.Context, wg *sync.WaitGroup, results <-chan CrawlResult, errCh chan<- CustomError, splitChunksFunc func(doc string, count TokenCounterFunc, option Options) []Chunk) {
 	if splitChunksFunc == nil {
 		splitChunksFunc = SplitToChunks
 	}
@@ -74,8 +73,8 @@ func (e *EmbeddingProcessor) Process(ctx context.Context, results <-chan CrawlRe
 	batch := make([]EmbeddingJob, 0, e.batchSize)
 
 	for range e.numWorker {
-		e.wg.Add(1)
-		go e.worker(ctx, batchChan, errCh)
+		wg.Add(1)
+		go e.worker(ctx, wg, batchChan, errCh)
 	}
 
 	sendBatch := func(batch []EmbeddingJob) {
@@ -120,7 +119,7 @@ func (e *EmbeddingProcessor) Process(ctx context.Context, results <-chan CrawlRe
 	}
 
 	close(batchChan)
-	e.wg.Wait()
+	wg.Wait()
 }
 
 // worker xử lý từng batch: embed -> marshal payload -> upsert. Ở mỗi bước lỗi,
@@ -128,7 +127,7 @@ func (e *EmbeddingProcessor) Process(ctx context.Context, results <-chan CrawlRe
 //   - create_embedding lỗi: nguyên batch (vì chưa embed được gì).
 //   - json_marshal lỗi: chỉ đúng 1 job bị lỗi.
 //   - upsert lỗi: chỉ các job thực sự đã embed+marshal OK (đó là cái cần re-upsert).
-func (e *EmbeddingProcessor) worker(ctx context.Context, batchs <-chan []EmbeddingJob, errCh chan<- CustomError) {
+func (e *EmbeddingProcessor) worker(ctx context.Context, wg *sync.WaitGroup, batchs <-chan []EmbeddingJob, errCh chan<- CustomError) {
 	for batch := range batchs {
 		input := make([]string, len(batch))
 		for i, chunk := range batch {
@@ -185,5 +184,5 @@ func (e *EmbeddingProcessor) worker(ctx context.Context, batchs <-chan []Embeddi
 			})
 		}
 	}
-	e.wg.Done()
+	wg.Done()
 }
